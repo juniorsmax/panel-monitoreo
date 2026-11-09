@@ -112,3 +112,11 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 dialog form { display: flex; flex-direction: column; gap: 14px; }
 dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.adm-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.stat.adm b { font-size: 24px; }
+.stat.adm.bien { border-left: 6px solid var(--ok-line); }
+.stat.adm.mal { border-left: 6px solid var(--down-line); }
+.usuarios { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 12px; }
+.wrap > .main { flex: none; }
+.grid.cli { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }

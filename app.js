@@ -13,7 +13,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
 const app = document.getElementById('app');
 const NS = 'http://www.w3.org/2000/svg';
 
-const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null };
+const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null };
 
 /* ---------- utilidades de DOM (nunca se inserta texto como HTML) ---------- */
 function h(tag, attrs, ...hijos) {
@@ -117,8 +117,29 @@ async function cargarTablero() {
   if (error) throw error;
   estado.datos = data;
 }
+async function cargarAdmin() {
+  const { data, error } = await sb.rpc('panel_admin_resumen');
+  if (error) throw error;
+  estado.admin = data;
+}
 async function refrescar() {
-  try { await cargarTablero(); pintar(); } catch (e) { console.error(e); }
+  try {
+    if (estado.vista === 'admin' && estado.esAdmin) { await cargarAdmin(); pintarAdmin(); }
+    else { await cargarTablero(); pintar(); }
+  } catch (e) { console.error(e); registrarUso('error_carga', 'refresco'); }
+}
+// Registro de uso propio: solo tipo y un detalle corto; el servidor limita la frecuencia.
+function registrarUso(tipo, detalle) {
+  if (!estado.org) return;
+  sb.rpc('panel_registrar_uso', { p_org: estado.org.org_id, p_tipo: tipo, p_detalle: detalle || null })
+    .then(() => {}, () => {});
+}
+async function cambiarVista(v) {
+  estado.vista = v;
+  if (v === 'admin') {
+    try { await cargarAdmin(); registrarUso('vista_admin', null); } catch (e) { console.error(e); estado.vista = 'panel'; }
+    estado.vista === 'admin' ? pintarAdmin() : pintar();
+  } else pintar();
 }
 
 /* ---------- pantalla principal ---------- */
@@ -246,6 +267,61 @@ function pintar() {
           h('span', {}, 'Las caídas te llegan por Telegram al momento. Lo demás lo ves aquí.')))));
 }
 
+/* ---------- administración (solo administrador de la plataforma) ---------- */
+const TIPO_USO = {
+  entrada: 'Entró al panel', objetivo_anadido: 'Añadió', objetivo_quitado: 'Quitó',
+  error_carga: 'Error al cargar', vista_admin: 'Abrió Administración',
+};
+function mosaico(valor, etiqueta, nivel) {
+  return h('div', { class: 'stat adm ' + (nivel || '') }, h('b', {}, valor), h('span', {}, etiqueta));
+}
+function pintarAdmin() {
+  const a = estado.admin || {};
+  const s = a.sistema || {};
+  const pct = s.db_limite_mb ? Math.round((s.db_mb / s.db_limite_mb) * 100) : 0;
+  const minSin = s.ultimo_chequeo ? Math.round((Date.now() - new Date(s.ultimo_chequeo).getTime()) / 60000) : null;
+  const chequeoNivel = s.objetivos_activos === 0 ? '' : minSin == null || minSin > 10 ? 'mal' : 'bien';
+  const sistema = [
+    mosaico(s.objetivos_activos === 0 ? 'Sin webs aún' : minSin == null ? 'Sin datos' : hace(s.ultimo_chequeo).replace('Hace ', ''), 'última comprobación', chequeoNivel),
+    mosaico(`${s.db_mb ?? 0} de ${s.db_limite_mb ?? 500} MB`, `base de datos (${pct} %)`, pct >= 80 ? 'mal' : 'bien'),
+    mosaico(String(s.avisos_sin_enviar ?? 0), 'avisos sin enviar', s.avisos_sin_enviar > 0 ? 'mal' : 'bien'),
+    mosaico(String(s.tareas_fallidas_24h ?? 0), 'tareas fallidas, 24 h', s.tareas_fallidas_24h > 0 ? 'mal' : 'bien'),
+    mosaico(String(s.peticiones_error_1h ?? 0), 'peticiones con error, 1 h', s.peticiones_error_1h > 0 ? 'mal' : 'bien'),
+  ];
+  const clientes = a.clientes || [];
+  const uso = a.uso || {};
+  const recientes = uso.recientes || [];
+  const porTipo = Object.entries(uso.por_tipo_7d || {});
+
+  app.replaceChildren(
+    cabecera(false),
+    h('section', { class: 'hero' }, sol(),
+      h('div', { class: 'txt' },
+        h('span', { class: 'fecha' }, 'Administración'),
+        h('h1', {}, 'Cómo va toda la plataforma'),
+        h('p', {}, `${clientes.length} ${clientes.length === 1 ? 'cliente' : 'clientes'}. Solo tú ves esta pantalla.`))),
+    h('section', { class: 'main' }, h('h2', {}, 'Estado del sistema'), h('div', { class: 'stats adm-stats' }, sistema)),
+    h('section', { class: 'main' }, h('h2', {}, 'Clientes'),
+      clientes.length ? h('div', { class: 'grid cli' }, clientes.map((c) => h('article', { class: 'card' },
+        h('div', { class: 'row' }, h('div', { class: 'nom' }, c.nombre),
+          h('span', { class: 'chip ' + (c.caidos > 0 ? 'down' : 'ok') }, c.caidos > 0 ? `${c.caidos} sin responder` : 'Todo en línea')),
+        h('div', { class: 'meta' },
+          h('span', {}, 'Webs ', h('b', {}, `${c.objetivos} de ${c.max_objetivos}`)),
+          h('span', {}, 'Comprobaciones 24 h ', h('b', {}, String(c.chequeos_24h)))),
+        h('div', { class: 'usuarios' }, (c.usuarios || []).map((u) => h('div', { class: 'meta' },
+          h('span', {}, u.email, ' · ', u.rol),
+          h('span', {}, u.ultimo_acceso ? hace(u.ultimo_acceso) : 'Nunca entró')))))))
+        : h('p', { class: 'vacio' }, 'Todavía no hay clientes.')),
+    h('section', { class: 'main' }, h('h2', {}, 'Uso del panel'),
+      porTipo.length ? h('div', { class: 'stats adm-stats' }, porTipo.map(([t, n]) => mosaico(String(n), (TIPO_USO[t] || t) + ', 7 días'))) : null,
+      recientes.length
+        ? h('div', { class: 'ev' }, recientes.map((e) => h('div', { class: 'it' },
+            h('div', { class: 'dot ' + (e.tipo === 'error_carga' ? 'urgente' : 'informativo'), 'aria-hidden': 'true' }),
+            h('div', {}, h('b', {}, `${TIPO_USO[e.tipo] || e.tipo}${e.detalle ? ': ' + e.detalle : ''}`),
+              h('div', { class: 'd' }, `${e.email || 'Usuario'} · ${e.org || ''}`), h('div', { class: 't' }, hace(e.ts))))))
+        : h('p', { class: 'vacio' }, 'Aún no hay actividad registrada.')));
+}
+
 function cabecera(conTabs, tabs) {
   const t = temaActual();
   const selectorOrg = estado.orgs.length > 1 && h('select', {
@@ -261,12 +337,16 @@ function cabecera(conTabs, tabs) {
       h('div', {}, h('b', {}, estado.org ? estado.org.nombre : 'Zervitecnics'), h('span', {}, 'Panel de monitoreo'))),
     conTabs && h('nav', { class: 'tabs', 'aria-label': 'Filtro' }, tabs),
     h('div', { class: 'tools' }, selectorOrg,
+      estado.esAdmin && h('div', { class: 'seg', role: 'group', 'aria-label': 'Vista' },
+        [['panel', 'Mi panel'], ['admin', 'Administración']].map(([k, n]) => h('button', {
+          type: 'button', 'aria-pressed': String(estado.vista === k), onclick: () => cambiarVista(k),
+        }, n))),
       h('div', { class: 'seg', role: 'group', 'aria-label': 'Tema' },
         ['claro', 'oscuro'].map((n) => h('button', {
           type: 'button', 'aria-pressed': String(t === n),
-          onclick: () => { aplicarTema(n, true); pintar(); },
+          onclick: () => { aplicarTema(n, true); estado.vista === 'admin' && estado.esAdmin ? pintarAdmin() : pintar(); },
         }, n === 'claro' ? 'Claro' : 'Oscuro'))),
-      h('button', { class: 'link', type: 'button', onclick: async () => { await sb.auth.signOut(); estado.datos = null; pantallaLogin(); } }, 'Salir')));
+      h('button', { class: 'link', type: 'button', onclick: async () => { await sb.auth.signOut(); estado.datos = null; estado.vista = 'panel'; estado.esAdmin = false; try { sessionStorage.removeItem('entrada'); } catch (_) { /* nada */ } pantallaLogin(); } }, 'Salir')));
 }
 
 /* ---------- arranque ---------- */
@@ -275,12 +355,17 @@ async function iniciar() {
   if (!session) { pantallaLogin(); return; }
   try {
     await cargarOrgs();
+    try { const r = await sb.rpc('panel_es_admin'); estado.esAdmin = r.data === true; } catch (_) { estado.esAdmin = false; }
     await cargarTablero();
     pintar();
+    let ya = false;
+    try { ya = sessionStorage.getItem('entrada') === '1'; sessionStorage.setItem('entrada', '1'); } catch (_) { /* nada */ }
+    if (!ya) registrarUso('entrada', null);
     clearInterval(estado.timer);
     estado.timer = setInterval(refrescar, REFRESCO_MS);
   } catch (e) {
     console.error(e);
+    registrarUso('error_carga', 'inicio');
     pantallaLogin('No se han podido cargar los datos. Vuelve a entrar.', 'err');
   }
 }

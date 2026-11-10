@@ -13,7 +13,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
 const app = document.getElementById('app');
 const NS = 'http://www.w3.org/2000/svg';
 
-const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null };
+const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [] };
 
 /* ---------- utilidades de DOM (nunca se inserta texto como HTML) ---------- */
 function h(tag, attrs, ...hijos) {
@@ -116,6 +116,11 @@ async function cargarTablero() {
   const { data, error } = await sb.rpc('panel_tablero', { p_org: estado.org.org_id });
   if (error) throw error;
   estado.datos = data;
+  // Las fuentes de datos son un extra: si fallan, el resto del panel sigue funcionando.
+  try {
+    const f = await sb.rpc('panel_fuentes', { p_org: estado.org.org_id });
+    estado.fuentes = f.error ? [] : (f.data || []);
+  } catch (_) { estado.fuentes = []; }
 }
 async function cargarAdmin() {
   const { data, error } = await sb.rpc('panel_admin_resumen');
@@ -211,6 +216,89 @@ function dialogoAnadir() {
   dlg.showModal();
 }
 
+/* ---------- fuentes de datos: búsquedas y visitas ---------- */
+const NOMBRE_FUENTE = { search_console: 'Google', bing: 'Bing', cloudflare: 'Cloudflare' };
+const ETIQ_FUENTE = {
+  search_console: ['Clics desde Google', 'Apariciones en Google'],
+  bing: ['Clics desde Bing', 'Apariciones en Bing'],
+  cloudflare: ['Visitantes únicos', 'Peticiones'],
+};
+function variacion(ahora, antes) {
+  if (!antes) return null;
+  const p = Math.round(((ahora - antes) / antes) * 100);
+  return (p > 0 ? '+' : '') + p + ' % frente a los 28 días anteriores';
+}
+function tarjetaFuente(f) {
+  const [e1, e2] = ETIQ_FUENTE[f.tipo] || ['Visitas', 'Apariciones'];
+  const fmt = (n) => Number(n || 0).toLocaleString('es-ES');
+  const sinDatos = !f.dias_con_datos;
+  const v = variacion(f.clics_28, f.clics_28_ant);
+  return h('article', { class: 'card' },
+    h('div', { class: 'row' },
+      h('div', {}, h('div', { class: 'nom' }, f.nombre), h('div', { class: 'url' }, NOMBRE_FUENTE[f.tipo] || f.tipo)),
+      h('span', { class: 'chip ' + (f.con_error ? 'down' : 'ok') }, f.con_error ? 'Sin conexión' : sinDatos ? 'Esperando datos' : 'Al día')),
+    sinDatos ? h('p', { class: 'vacio' }, f.con_error ? 'No se han podido leer los datos todavía.' : 'Los primeros datos aparecen en cuanto se hace la primera lectura.')
+      : [
+        h('div', { class: 'meta' }, h('span', {}, e1, ' · 28 días'), h('b', {}, fmt(f.clics_28))),
+        v && h('div', { class: 'meta' }, h('span', {}, v)),
+        spark({ serie: f.serie }, 'ok'),
+        h('div', { class: 'meta' }, h('span', {}, e2), h('b', {}, fmt(f.impr_28))),
+        f.posicion_28 != null && h('div', { class: 'meta' }, h('span', {}, 'Posición media'), h('b', {}, String(f.posicion_28).replace('.', ','))),
+      ],
+    f.error && h('div', { class: 'meta' }, h('span', {}, f.error)));
+}
+
+/* ---------- conectar una fuente (solo administrador de la plataforma) ---------- */
+function dialogoFuente(c) {
+  const tipo = h('select', {},
+    h('option', { value: 'search_console' }, 'Google Search Console'),
+    h('option', { value: 'bing' }, 'Bing Webmaster'),
+    h('option', { value: 'cloudflare' }, 'Cloudflare (analítica)'));
+  const sitio = h('input', { type: 'text', required: true, maxlength: 200, placeholder: 'sc-domain:ejemplo.es', autocomplete: 'off' });
+  const nombre = h('input', { type: 'text', required: true, maxlength: 80, placeholder: 'Nombre de la web' });
+  const ayuda = h('div', { class: 'meta' });
+  const AYUDAS = {
+    search_console: ['sc-domain:ejemplo.es', 'La propiedad tal como sale en Search Console: «sc-domain:ejemplo.es» o la dirección completa con https:// y barra final.'],
+    bing: ['https://ejemplo.es/', 'La dirección de la web tal como la diste de alta en Bing Webmaster.'],
+    cloudflare: ['Identificador de zona', 'El «ID de zona» que sale en la página principal del dominio en Cloudflare.'],
+  };
+  const cambia = () => { const [ph, tx] = AYUDAS[tipo.value]; sitio.placeholder = ph; ayuda.replaceChildren(h('span', {}, tx)); };
+  tipo.addEventListener('change', cambia); cambia();
+  const err = h('div', { class: 'msg', role: 'alert' });
+  const enviar = h('button', { class: 'btn', type: 'submit' }, 'Conectar');
+  const dlg = h('dialog', { 'aria-labelledby': 'tit-fte' },
+    h('form', {
+      method: 'dialog',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.className = 'msg'; err.textContent = '';
+        enviar.disabled = true;
+        const { data, error } = await sb.functions.invoke('clientes', {
+          body: { accion: 'fuente', org_id: c.org_id, tipo: tipo.value, sitio: sitio.value.trim(), nombre: nombre.value.trim() },
+        });
+        enviar.disabled = false;
+        let msg = data && data.error;
+        if (error && !msg) {
+          try { msg = (await error.context.json()).error; } catch (_) { /* sin detalle */ }
+          msg = msg || 'No se ha podido conectar.';
+        }
+        if (msg) { err.className = 'msg err'; err.textContent = msg; return; }
+        dlg.close(); dlg.remove();
+        alert('Fuente conectada. En unos segundos aparecerá en el panel de ese cliente.');
+      },
+    },
+      h('h2', { id: 'tit-fte' }, `Conectar datos a ${c.nombre}`),
+      h('label', { class: 'campo' }, 'Servicio', tipo),
+      h('label', { class: 'campo' }, 'Sitio', sitio), ayuda,
+      h('label', { class: 'campo' }, 'Nombre', nombre),
+      err,
+      h('div', { class: 'acciones' },
+        h('button', { class: 'btn sec', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancelar'),
+        enviar)));
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
 function pintar() {
   const d = estado.datos;
   if (!estado.org) {
@@ -264,7 +352,10 @@ function pintar() {
               h('div', {}, h('b', {}, a.titulo), a.detalle && h('div', { class: 'd' }, a.detalle), h('div', { class: 't' }, hace(a.creada_en))))))
           : h('p', { class: 'vacio' }, 'Sin novedades. Cuando algo cambie, lo verás aquí.'),
         h('div', { class: 'aviso' }, h('b', {}, 'Avisos al móvil activados'),
-          h('span', {}, 'Las caídas te llegan por Telegram al momento. Lo demás lo ves aquí.')))));
+          h('span', {}, 'Las caídas te llegan por Telegram al momento. Lo demás lo ves aquí.')))),
+    estado.fuentes.length ? h('section', { class: 'main' },
+      h('div', { class: 'head' }, h('h2', {}, 'Búsquedas y visitas')),
+      h('div', { class: 'grid' }, estado.fuentes.map(tarjetaFuente))) : null);
 }
 
 /* ---------- administración (solo administrador de la plataforma) ---------- */
@@ -369,7 +460,9 @@ function pintarAdmin() {
           h('span', {}, 'Comprobaciones 24 h ', h('b', {}, String(c.chequeos_24h)))),
         h('div', { class: 'usuarios' }, (c.usuarios || []).map((u) => h('div', { class: 'meta' },
           h('span', {}, u.email, ' · ', u.rol),
-          h('span', {}, u.ultimo_acceso ? hace(u.ultimo_acceso) : 'Nunca entró')))))))
+          h('span', {}, u.ultimo_acceso ? hace(u.ultimo_acceso) : 'Nunca entró')))),
+        h('div', { class: 'acciones' },
+          h('button', { class: 'btn sec', type: 'button', onclick: () => dialogoFuente(c) }, 'Conectar datos')))))
         : h('p', { class: 'vacio' }, 'Todavía no hay clientes.')),
     h('section', { class: 'main' }, h('h2', {}, 'Uso del panel'),
       porTipo.length ? h('div', { class: 'stats adm-stats' }, porTipo.map(([t, n]) => mosaico(String(n), (TIPO_USO[t] || t) + ', 7 días'))) : null,

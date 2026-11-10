@@ -122,3 +122,10 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; flex-wra
 .grid.cli { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 
 [hidden] { display: none !important; }
+
+.ayuda-grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.card.ayuda { gap: 10px; }
+.card.ayuda h3 { margin: 0; font-family: "Fraunces", serif; font-size: 20px; }
+.card.ayuda p { margin: 0; line-height: 1.5; }
+.card.ayuda .meta { display: grid; grid-template-columns: 112px 1fr; gap: 10px; align-items: center; }
+.card.ayuda .meta .chip { justify-self: start; }

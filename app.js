@@ -132,7 +132,13 @@ async function cargarAdmin() {
   if (error) throw error;
   estado.admin = data;
 }
+function repintar() {
+  if (estado.vista === 'ayuda') pintarAyuda();
+  else if (estado.vista === 'admin' && estado.esAdmin) pintarAdmin();
+  else pintar();
+}
 async function refrescar() {
+  if (estado.vista === 'ayuda') return; // no se repinta mientras se lee la ayuda
   try {
     if (estado.vista === 'admin' && estado.esAdmin) { await cargarAdmin(); pintarAdmin(); }
     else { await cargarTablero(); pintar(); }
@@ -146,6 +152,7 @@ function registrarUso(tipo, detalle) {
 }
 async function cambiarVista(v) {
   estado.vista = v;
+  if (v === 'ayuda') { pintarAyuda(); window.scrollTo(0, 0); return; }
   if (v === 'admin') {
     try { await cargarAdmin(); registrarUso('vista_admin', null); } catch (e) { console.error(e); estado.vista = 'panel'; }
     estado.vista === 'admin' ? pintarAdmin() : pintar();
@@ -479,6 +486,48 @@ function pintarAdmin() {
         : h('p', { class: 'vacio' }, 'Aún no hay actividad registrada.')));
 }
 
+/* ---------- ayuda para los usuarios (solo uso, sin detalles internos) ---------- */
+function pintarAyuda() {
+  const rol = estado.org ? estado.org.rol : 'viewer';
+  const puedeEditar = ['owner', 'admin'].includes(rol);
+  const bloque = (titulo, ...parrafos) => h('article', { class: 'card ayuda' }, h('h3', {}, titulo), parrafos.flat(2));
+  const estadoAyuda = (cls, texto, desc) => h('div', { class: 'meta' }, h('span', { class: 'chip ' + cls }, texto), h('span', {}, desc));
+  app.replaceChildren(
+    cabecera(false),
+    h('section', { class: 'hero' }, sol(),
+      h('div', { class: 'txt' },
+        h('span', { class: 'fecha' }, 'Ayuda'),
+        h('h1', {}, 'Cómo usar tu panel'),
+        h('p', {}, 'Aquí ves si tus webs y bots funcionan, y te avisamos al móvil cuando algo falla.'))),
+    h('div', { class: 'grid ayuda-grid' },
+      bloque('Entrar',
+        h('p', {}, 'Escribe tu correo y pulsa para recibir el enlace. Te llega un correo de Zervitecnics con el botón «Entrar al panel». El enlace caduca pronto y sirve una sola vez.'),
+        h('p', {}, 'Después la sesión se queda abierta en ese navegador. Para cerrarla, pulsa «Salir».')),
+      bloque('La cabecera amarilla',
+        h('p', {}, 'Resume cómo va todo. Debajo verás cuántas webs están en línea ahora, la disponibilidad de los últimos 30 días y el tiempo medio de respuesta de hoy.')),
+      bloque('Qué significa cada estado',
+        estadoAyuda('ok', 'Funciona', 'Responde bien y rápido.'),
+        estadoAyuda('slow', 'Va lento', 'Responde, pero tarda más de 1,5 segundos.'),
+        estadoAyuda('down', 'No responde', 'Ha fallado dos comprobaciones seguidas.'),
+        estadoAyuda('none', 'Sin datos', 'Todavía no se ha comprobado.')),
+      bloque('Cada cuánto se comprueba',
+        h('p', {}, 'Cada web o bot se comprueba cada 5 minutos, de día y de noche. La línea de cada tarjeta muestra cómo ha respondido en las últimas 24 horas.')),
+      bloque('Avisos al móvil',
+        h('p', {}, 'Si algo deja de responder, te llega un aviso por Telegram en unos minutos. También lo verás en «Qué ha pasado», junto a cuándo vuelve a funcionar.'),
+        h('p', {}, 'Los lunes por la mañana recibes un resumen de la semana.')),
+      bloque(puedeEditar ? 'Añadir o quitar webs' : 'Tu acceso',
+        puedeEditar
+          ? [h('p', {}, 'Pulsa «+ Añadir web o bot», escribe un nombre y la dirección completa (por ejemplo, https://tuweb.com) y elige el tipo.'),
+             h('p', {}, 'Para dejar de vigilar algo, pulsa «Dejar de vigilar» en su tarjeta. Tu plan incluye un número máximo de webs.')]
+          : h('p', {}, 'Tu acceso es de solo lectura: puedes ver todo, pero no añadir ni quitar webs. Si necesitas cambiar algo, pídeselo a Zervitecnics.')),
+      bloque('Búsquedas y visitas',
+        h('p', {}, 'Si tu plan lo incluye, verás cuántas veces apareces en Google y Bing, cuántas personas hacen clic y las visitas a tu web, comparado con los 28 días anteriores. Se actualiza una vez al día.')),
+      bloque('Claro u oscuro',
+        h('p', {}, 'Con los botones «Claro» y «Oscuro» eliges cómo ver el panel. Se recuerda en este navegador.')),
+      bloque('¿Necesitas ayuda?',
+        h('p', {}, 'Escribe a Zervitecnics: ', h('b', {}, 'info@zervitecnics.es')))));
+}
+
 function cabecera(conTabs, tabs) {
   const t = temaActual();
   const selectorOrg = estado.orgs.length > 1 && h('select', {
@@ -501,8 +550,10 @@ function cabecera(conTabs, tabs) {
       h('div', { class: 'seg', role: 'group', 'aria-label': 'Tema' },
         ['claro', 'oscuro'].map((n) => h('button', {
           type: 'button', 'aria-pressed': String(t === n),
-          onclick: () => { aplicarTema(n, true); estado.vista === 'admin' && estado.esAdmin ? pintarAdmin() : pintar(); },
+          onclick: () => { aplicarTema(n, true); repintar(); },
         }, n === 'claro' ? 'Claro' : 'Oscuro'))),
+      h('button', { class: 'link', type: 'button', 'aria-pressed': String(estado.vista === 'ayuda'),
+        onclick: () => cambiarVista(estado.vista === 'ayuda' ? 'panel' : 'ayuda') }, estado.vista === 'ayuda' ? 'Volver al panel' : 'Ayuda'),
       h('button', { class: 'link', type: 'button', onclick: async () => { await sb.auth.signOut(); estado.datos = null; estado.vista = 'panel'; estado.esAdmin = false; try { sessionStorage.removeItem('entrada'); } catch (_) { /* nada */ } pantallaLogin(); } }, 'Salir')));
 }
 

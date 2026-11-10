@@ -1,5 +1,10 @@
 'use strict';
 // Panel de monitoreo · Zervitecnics
+// Si otra web intenta mostrar el panel dentro de la suya (para engañar al usuario), no se muestra.
+if (window.top !== window.self) {
+  document.documentElement.style.display = 'none';
+  throw new Error('El panel no se puede mostrar dentro de otra web');
+}
 // La URL y la clave publishable de Supabase son públicas por diseño: lo que protege los datos
 // son las reglas de acceso (RLS) de la base de datos. Aquí no hay ningún secreto.
 const SUPABASE_URL = 'https://eyqyerspaqubfsckugyi.supabase.co';

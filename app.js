@@ -275,6 +275,63 @@ const TIPO_USO = {
 function mosaico(valor, etiqueta, nivel) {
   return h('div', { class: 'stat adm ' + (nivel || '') }, h('b', {}, valor), h('span', {}, etiqueta));
 }
+function dialogoInvitar(clientes) {
+  const email = h('input', { type: 'email', required: true, maxlength: 200, placeholder: 'cliente@ejemplo.com', autocomplete: 'off' });
+  const cliente = h('select', {},
+    h('option', { value: '' }, 'Cliente nuevo'),
+    (clientes || []).map((c) => h('option', { value: c.org_id }, c.nombre)));
+  const nombre = h('input', { type: 'text', maxlength: 80, placeholder: 'Nombre del cliente o negocio' });
+  const campoNombre = h('label', { class: 'campo' }, 'Nombre del cliente nuevo', nombre);
+  const rol = h('select', {},
+    h('option', { value: 'owner' }, 'Dueño: ve y gestiona todo'),
+    h('option', { value: 'admin' }, 'Administrador: añade y quita webs'),
+    h('option', { value: 'viewer' }, 'Solo lectura: solo mira'));
+  const maxObj = h('input', { type: 'number', min: 1, max: 500, value: 10 });
+  const campoMax = h('label', { class: 'campo' }, 'Webs que puede vigilar', maxObj);
+  const err = h('div', { class: 'msg', role: 'alert' });
+  const enviar = h('button', { class: 'btn', type: 'submit' }, 'Enviar invitación');
+  const alternar = () => {
+    const nuevo = cliente.value === '';
+    campoNombre.hidden = !nuevo; campoMax.hidden = !nuevo;
+    nombre.required = nuevo;
+  };
+  cliente.addEventListener('change', alternar);
+  const dlg = h('dialog', { 'aria-labelledby': 'tit-inv' },
+    h('form', {
+      method: 'dialog',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.className = 'msg'; err.textContent = '';
+        enviar.disabled = true;
+        const cuerpo = { accion: 'invitar', email: email.value.trim(), rol: rol.value };
+        if (cliente.value) cuerpo.org_id = cliente.value;
+        else { cuerpo.org_nombre = nombre.value.trim(); cuerpo.max_objetivos = parseInt(maxObj.value, 10); }
+        const { data, error } = await sb.functions.invoke('clientes', { body: cuerpo });
+        enviar.disabled = false;
+        let msg = data && data.error;
+        if (error && !msg) {
+          try { msg = (await error.context.json()).error; } catch (_) { /* sin detalle */ }
+          msg = msg || 'No se ha podido enviar la invitación.';
+        }
+        if (msg) { err.className = 'msg err'; err.textContent = msg; return; }
+        dlg.close(); dlg.remove();
+        await cargarAdmin(); pintarAdmin();
+        alert(data.invitado ? 'Invitación enviada por correo.' : 'Esa persona ya tenía cuenta: se ha añadido al cliente.');
+      },
+    },
+      h('h2', { id: 'tit-inv' }, 'Invitar a un cliente'),
+      h('label', { class: 'campo' }, 'Correo de la persona', email),
+      h('label', { class: 'campo' }, 'Cliente', cliente),
+      campoNombre, campoMax,
+      h('label', { class: 'campo' }, 'Qué puede hacer', rol),
+      err,
+      h('div', { class: 'acciones' },
+        h('button', { class: 'btn sec', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancelar'),
+        enviar)));
+  alternar();
+  document.body.append(dlg);
+  dlg.showModal();
+}
 function pintarAdmin() {
   const a = estado.admin || {};
   const s = a.sistema || {};
@@ -301,7 +358,9 @@ function pintarAdmin() {
         h('h1', {}, 'Cómo va toda la plataforma'),
         h('p', {}, `${clientes.length} ${clientes.length === 1 ? 'cliente' : 'clientes'}. Solo tú ves esta pantalla.`))),
     h('section', { class: 'main' }, h('h2', {}, 'Estado del sistema'), h('div', { class: 'stats adm-stats' }, sistema)),
-    h('section', { class: 'main' }, h('h2', {}, 'Clientes'),
+    h('section', { class: 'main' },
+      h('div', { class: 'head' }, h('h2', {}, 'Clientes'),
+        h('button', { class: 'btn', type: 'button', onclick: () => dialogoInvitar(clientes) }, '+ Invitar cliente')),
       clientes.length ? h('div', { class: 'grid cli' }, clientes.map((c) => h('article', { class: 'card' },
         h('div', { class: 'row' }, h('div', { class: 'nom' }, c.nombre),
           h('span', { class: 'chip ' + (c.caidos > 0 ? 'down' : 'ok') }, c.caidos > 0 ? `${c.caidos} sin responder` : 'Todo en línea')),

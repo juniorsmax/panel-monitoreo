@@ -120,3 +120,5 @@ dialog .acciones { display: flex; gap: 10px; justify-content: flex-end; flex-wra
 .usuarios { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 12px; }
 .wrap > .main { flex: none; }
 .grid.cli { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+
+[hidden] { display: none !important; }

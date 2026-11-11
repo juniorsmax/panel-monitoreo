@@ -21,6 +21,8 @@ const NS = 'http://www.w3.org/2000/svg';
 const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [], seguridad: null };
 
 /* ---------- utilidades de DOM (nunca se inserta texto como HTML) ---------- */
+// Como replaceChildren, pero ignora los huecos (null/false) igual que h(): si no, se pintaría el texto «null».
+function pintarEn(el, ...hijos) { el.replaceChildren(...hijos.flat().filter((c) => c != null && c !== false)); }
 function h(tag, attrs, ...hijos) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -104,7 +106,7 @@ function pantallaLogin(mensaje, tipo) {
     h('button', { class: 'btn', type: 'submit' }, 'Enviar enlace'),
     aviso,
   );
-  app.replaceChildren(form);
+  pintarEn(app, form);
 }
 
 /* ---------- datos ---------- */
@@ -419,7 +421,7 @@ function dialogoFuente(c) {
 function pintar() {
   const d = estado.datos;
   if (!estado.org) {
-    app.replaceChildren(cabecera(false), h('p', { class: 'vacio' }, 'Tu cuenta todavía no tiene acceso a ningún cliente. Pídele acceso a Junior.'));
+    pintarEn(app, cabecera(false), h('p', { class: 'vacio' }, 'Tu cuenta todavía no tiene acceso a ningún cliente. Pídele acceso a Junior.'));
     return;
   }
   const esAdmin = ['owner', 'admin'].includes(estado.org.rol);
@@ -449,7 +451,7 @@ function pintar() {
 
   const alertas = d?.alertas || [];
 
-  app.replaceChildren(
+  pintarEn(app, 
     cabecera(true, tabs),
     h('section', { class: 'hero' }, sol(),
       h('div', { class: 'txt' },
@@ -558,7 +560,7 @@ function pintarAdmin() {
   const recientes = uso.recientes || [];
   const porTipo = Object.entries(uso.por_tipo_7d || {});
 
-  app.replaceChildren(
+  pintarEn(app, 
     cabecera(false),
     h('section', { class: 'hero' }, sol(),
       h('div', { class: 'txt' },
@@ -597,7 +599,7 @@ function pintarAyuda() {
   const puedeEditar = ['owner', 'admin'].includes(rol);
   const bloque = (titulo, ...parrafos) => h('article', { class: 'card ayuda' }, h('h3', {}, titulo), parrafos.flat(2));
   const estadoAyuda = (cls, texto, desc) => h('div', { class: 'meta' }, h('span', { class: 'chip ' + cls }, texto), h('span', {}, desc));
-  app.replaceChildren(
+  pintarEn(app, 
     cabecera(false),
     h('section', { class: 'hero' }, sol(),
       h('div', { class: 'txt' },

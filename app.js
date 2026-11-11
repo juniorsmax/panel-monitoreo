@@ -18,7 +18,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
 const app = document.getElementById('app');
 const NS = 'http://www.w3.org/2000/svg';
 
-const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [] };
+const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [], seguridad: null };
 
 /* ---------- utilidades de DOM (nunca se inserta texto como HTML) ---------- */
 function h(tag, attrs, ...hijos) {
@@ -126,6 +126,11 @@ async function cargarTablero() {
     const f = await sb.rpc('panel_fuentes', { p_org: estado.org.org_id });
     estado.fuentes = f.error ? [] : (f.data || []);
   } catch (_) { estado.fuentes = []; }
+  // El diagnóstico de seguridad también es un extra: si no está disponible, la tarjeta no lo muestra.
+  try {
+    const g = await sb.rpc('panel_seguridad', { p_org: estado.org.org_id });
+    estado.seguridad = g.error ? null : g.data;
+  } catch (_) { estado.seguridad = null; }
 }
 async function cargarAdmin() {
   const { data, error } = await sb.rpc('panel_admin_resumen');
@@ -189,6 +194,7 @@ function tarjeta(o, esAdmin) {
     h('div', { class: 'meta' },
       h('span', {}, 'Responde en ', h('b', {}, fmtMs(o.ultimo_ms))),
       h('span', {}, 'Disponible 24 h ', h('b', {}, fmtPct(o.uptime_24h)))),
+    lineaSeguridad(o),
     esAdmin && h('button', {
       class: 'link quitar', type: 'button',
       onclick: async () => {
@@ -209,11 +215,13 @@ function dialogoAnadir() {
       onsubmit: async (e) => {
         e.preventDefault();
         err.className = 'msg'; err.textContent = '';
-        const { error } = await sb.rpc('panel_crear_objetivo', {
+        const { data, error } = await sb.rpc('panel_crear_objetivo', {
           p_org: estado.org.org_id, p_nombre: nombre.value.trim(), p_url: url.value.trim(), p_tipo: tipo.value,
         });
         if (error) { err.className = 'msg err'; err.textContent = error.message || 'No se ha podido añadir.'; return; }
         dlg.close(); dlg.remove(); refrescar();
+        // Primera revisión de seguridad: queda como punto de partida. Si falla, la web se añade igual.
+        lanzarRevision(data, 'alta').then(() => refrescar(), () => {});
       },
     },
       h('h2', { id: 'tit-dlg' }, 'Añadir web o bot'),
@@ -226,6 +234,103 @@ function dialogoAnadir() {
         h('button', { class: 'btn', type: 'submit' }, 'Añadir'))));
   document.body.append(dlg);
   dlg.showModal();
+}
+
+/* ---------- seguridad: diagnóstico básico ---------- */
+const GRAVEDAD_TXT = { grave: 'Grave', media: 'Importante', baja: 'Leve' };
+const fmtNota = (n) => String(n).replace('.', ',');
+function claseNota(n) { return n >= 8 ? 'ok' : n >= 5 ? 'slow' : 'down'; }
+function diagnosticoDe(o) { return estado.seguridad?.webs?.[o.id] || null; }
+
+function lineaSeguridad(o) {
+  if (!estado.seguridad) return null;
+  const d = diagnosticoDe(o);
+  const fallos = d ? d.hallazgos.filter((x) => x.estado === 'fallo').length : 0;
+  return h('button', { class: 'seg-linea', type: 'button', onclick: () => dialogoSeguridad(o) },
+    h('span', {}, 'Seguridad'),
+    d ? h('span', { class: 'chip ' + claseNota(d.nota) }, fmtNota(d.nota) + ' / 10') : h('span', { class: 'chip none' }, 'Sin revisar'),
+    h('span', { class: 'seg-mas' }, d ? (fallos ? (fallos === 1 ? '1 cosa que mejorar' : fallos + ' cosas que mejorar') : 'Todo bien') : 'Revisar'));
+}
+
+async function lanzarRevision(objetivoId, origen) {
+  const { data, error } = await sb.functions.invoke('seguridad', {
+    body: { org_id: estado.org.org_id, objetivo_id: objetivoId, origen },
+  });
+  if (error) {
+    let msg = 'No se ha podido revisar la web.';
+    try { const j = await error.context.json(); if (j?.error) msg = j.error; } catch (_) { /* respuesta sin detalle */ }
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function hallazgo(x, veArreglos) {
+  const fallo = x.estado === 'fallo';
+  const cls = x.estado === 'ok' ? 'ok' : x.estado === 'fallo' ? (x.gravedad === 'grave' ? 'down' : 'slow') : 'none';
+  const etiqueta = x.estado === 'ok' ? 'Bien' : x.estado === 'fallo' ? GRAVEDAD_TXT[x.gravedad] : 'Sin comprobar';
+  return h('li', { class: 'hall ' + (fallo ? 'fallo' : '') },
+    h('div', { class: 'row' }, h('b', {}, x.titulo), h('span', { class: 'chip ' + cls }, etiqueta)),
+    fallo && h('p', {}, x.explicacion),
+    fallo && x.dato && h('p', { class: 'dato' }, 'Detectado: ', x.dato),
+    x.estado === 'no_revisado' && x.codigo === 'SEG-09' && h('p', { class: 'dato' }, 'Se comprueba cuando demuestres que la web es tuya.'),
+    fallo && (x.arreglo
+      ? h('div', { class: 'arreglo' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, x.arreglo))
+      : !veArreglos && h('div', { class: 'arreglo bloq' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, 'Disponible en el plan Pro.'))));
+}
+
+function dialogoSeguridad(o) {
+  const g = estado.seguridad;
+  const d = diagnosticoDe(o);
+  const quedan = Math.max(0, (g.max_revisiones_dia ?? 0) - (g.revisiones_hoy ?? 0));
+  const msg = h('div', { class: 'msg', role: 'status' });
+  const cerrar = () => { dlg.close(); dlg.remove(); };
+
+  const revisar = h('button', { class: 'btn', type: 'button', disabled: !estado.esAdmin && quedan === 0 },
+    estado.esAdmin ? 'Revisar ahora' : `Revisar ahora (${quedan === 1 ? 'te queda 1 hoy' : 'te quedan ' + quedan + ' hoy'})`);
+  revisar.onclick = async () => {
+    revisar.disabled = true; revisar.textContent = 'Revisando…';
+    msg.className = 'msg'; msg.textContent = '';
+    try {
+      await lanzarRevision(o.id, d ? 'manual' : 'alta');
+      await cargarTablero(); cerrar(); pintar(); dialogoSeguridad(o);
+    } catch (e) {
+      msg.className = 'msg err'; msg.textContent = e.message;
+      revisar.disabled = false; revisar.textContent = 'Revisar ahora';
+    }
+  };
+
+  const pedirArreglo = h('button', { class: 'btn sec', type: 'button' }, 'Quiero que me lo arreglen');
+  pedirArreglo.onclick = async () => {
+    pedirArreglo.disabled = true;
+    const { error } = await sb.rpc('panel_solicitar_arreglo', { p_org: estado.org.org_id, p_objetivo: o.id, p_nota: null });
+    if (error) { msg.className = 'msg err'; msg.textContent = error.message || 'No se ha podido enviar.'; pedirArreglo.disabled = false; return; }
+    msg.className = 'msg okk'; msg.textContent = 'Recibido. Te contactamos para arreglarlo.';
+    pedirArreglo.textContent = 'Solicitud enviada';
+    registrarUso('solicitar_arreglo', o.nombre);
+  };
+
+  const fallos = d ? d.hallazgos.filter((x) => x.estado === 'fallo').length : 0;
+  const dlg = h('dialog', { class: 'dlg-seg', 'aria-labelledby': 'tit-seg' },
+    h('div', { class: 'cuerpo' },
+      h('div', { class: 'seg-cab' },
+        h('div', {}, h('h2', { id: 'tit-seg', tabindex: '-1', autofocus: true }, 'Seguridad de ', o.nombre), h('div', { class: 'url' }, o.url)),
+        d && h('div', { class: 'nota ' + claseNota(d.nota) }, h('b', {}, fmtNota(d.nota)), h('span', {}, 'de 10'))),
+      d
+        ? h('p', { class: 'resumen' }, fallos ? `Hemos encontrado ${fallos === 1 ? 'una cosa' : fallos + ' cosas'} que mejorar. ` : 'No hemos encontrado nada que mejorar. ',
+            h('span', { class: 't' }, 'Revisado ' + hace(d.ts).replace(/^./, (c) => c.toLowerCase()) + '.'))
+        : h('p', { class: 'resumen' }, 'Esta web todavía no tiene ninguna revisión de seguridad.'),
+      d && h('ul', { class: 'halls' }, d.hallazgos.map((x) => hallazgo(x, g.ve_arreglos))),
+      d && !g.ve_arreglos && fallos > 0 && h('div', { class: 'aviso' }, h('b', {}, 'Plan Pro'),
+        h('span', {}, 'Con el plan Pro ves cómo arreglar cada punto y puedes lanzar análisis más completos de tu web, app o bot.')),
+      msg,
+      h('div', { class: 'acciones' },
+        h('button', { class: 'btn sec', type: 'button', onclick: cerrar }, 'Cerrar'),
+        d && fallos > 0 && pedirArreglo,
+        revisar)));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  dlg.scrollTop = 0; // que empiece por la nota y el resumen, no por los botones del final
 }
 
 /* ---------- fuentes de datos: búsquedas y visitas ---------- */

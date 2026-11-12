@@ -280,6 +280,21 @@ function hallazgo(x, veArreglos) {
       : !veArreglos && h('div', { class: 'arreglo bloq' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, 'Disponible en el plan Pro.'))));
 }
 
+// Mejoras recomendadas (accesibilidad): no restan nota y no tienen gravedad.
+function mejora(x, veArreglos) {
+  const fallo = x.estado === 'fallo';
+  const cls = x.estado === 'ok' ? 'ok' : fallo ? 'slow' : 'none';
+  const etiqueta = x.estado === 'ok' ? 'Bien' : fallo ? 'Mejorable' : 'Sin comprobar';
+  return h('li', { class: 'hall ' + (fallo ? 'fallo' : '') },
+    h('div', { class: 'row' }, h('b', {}, x.titulo), h('span', { class: 'chip ' + cls }, etiqueta)),
+    fallo && h('p', {}, x.explicacion),
+    fallo && x.dato && h('p', { class: 'dato' }, 'Detectado: ', x.dato),
+    x.estado === 'no_revisado' && h('p', { class: 'dato' }, 'No se puede comprobar en la revisión básica.'),
+    fallo && (x.arreglo
+      ? h('div', { class: 'arreglo' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, x.arreglo))
+      : !veArreglos && h('div', { class: 'arreglo bloq' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, 'Disponible en el plan Pro.'))));
+}
+
 function dialogoSeguridad(o) {
   const g = estado.seguridad;
   const d = diagnosticoDe(o);
@@ -322,6 +337,11 @@ function dialogoSeguridad(o) {
             h('span', { class: 't' }, 'Revisado ' + hace(d.ts).replace(/^./, (c) => c.toLowerCase()) + '.'))
         : h('p', { class: 'resumen' }, 'Esta web todavía no tiene ninguna revisión de seguridad.'),
       d && h('ul', { class: 'halls' }, d.hallazgos.map((x) => hallazgo(x, g.ve_arreglos))),
+      d && d.mejoras?.length > 0 && h('section', { class: 'mejoras' },
+        h('h3', {}, 'Mejoras recomendadas'),
+        h('p', { class: 'sub' }, 'No restan nota.'),
+        h('ul', { class: 'halls' }, d.mejoras.map((x) => mejora(x, g.ve_arreglos))),
+        h('p', { class: 'letra-chica' }, 'Orientativo. La accesibilidad solo es obligatoria si la ley te alcanza (la Ley 11/2023 exime a las microempresas que prestan servicios, art. 3.3). Aun así, mejora tu web.')),
       d && !g.ve_arreglos && fallos > 0 && h('div', { class: 'aviso' }, h('b', {}, 'Plan Pro'),
         h('span', {}, 'Con el plan Pro ves cómo arreglar cada punto y puedes lanzar análisis más completos de tu web, app o bot.')),
       msg,

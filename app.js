@@ -18,7 +18,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
 const app = document.getElementById('app');
 const NS = 'http://www.w3.org/2000/svg';
 
-const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [], seguridad: null };
+const estado = { orgs: [], org: null, datos: null, filtro: 'todo', timer: null, esAdmin: false, vista: 'panel', admin: null, fuentes: [], seguridad: null, estadisticas: null, adminSeg: null };
 
 /* ---------- utilidades de DOM (nunca se inserta texto como HTML) ---------- */
 // Como replaceChildren, pero ignora los huecos (null/false) igual que h(): si no, se pintaría el texto «null».
@@ -28,6 +28,7 @@ function h(tag, attrs, ...hijos) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v === false || v == null) continue;
     if (k === 'class') el.className = v;
+    else if (k === 'style') el.style.cssText = v; // por CSSOM: la política CSP no permite el atributo style
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? '' : v);
   }
@@ -105,6 +106,8 @@ function pantallaLogin(mensaje, tipo) {
     h('label', { class: 'campo' }, 'Correo', email),
     h('button', { class: 'btn', type: 'submit' }, 'Enviar enlace'),
     aviso,
+    h('p', { class: 'letra-chica' }, 'Al entrar se guarda tu dirección IP para evitar abusos. ',
+      h('a', { href: 'legal.html#privacidad', target: '_blank', rel: 'noopener' }, 'Política de privacidad')),
   );
   pintarEn(app, form);
 }
@@ -138,6 +141,11 @@ async function cargarAdmin() {
   const { data, error } = await sb.rpc('panel_admin_resumen');
   if (error) throw error;
   estado.admin = data;
+  const [e, s] = await Promise.all([
+    sb.rpc('panel_estadisticas', { p_dias: 30 }).then((r) => (r.error ? null : r.data), () => null),
+    sb.rpc('panel_admin_seguridad').then((r) => (r.error ? null : r.data), () => null),
+  ]);
+  estado.estadisticas = e; estado.adminSeg = s;
 }
 function repintar() {
   if (estado.vista === 'ayuda') pintarAyuda();
@@ -152,14 +160,21 @@ async function refrescar() {
   } catch (e) { console.error(e); registrarUso('error_carga', 'refresco'); }
 }
 // Registro de uso propio: solo tipo y un detalle corto; el servidor limita la frecuencia.
+// Con cada evento va el tipo de dispositivo, el idioma y la zona horaria del navegador. La IP no se guarda aquí.
+const CONTEXTO = (() => {
+  const ancho = Math.min(window.screen?.width || Infinity, window.innerWidth || Infinity);
+  let zona = null;
+  try { zona = Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_) { /* nada */ }
+  return { dispositivo: ancho < 600 ? 'movil' : ancho < 1024 ? 'tableta' : 'ordenador', idioma: navigator.language || null, zona };
+})();
 function registrarUso(tipo, detalle) {
   if (!estado.org) return;
-  sb.rpc('panel_registrar_uso', { p_org: estado.org.org_id, p_tipo: tipo, p_detalle: detalle || null })
+  sb.rpc('panel_registrar_uso', { p_org: estado.org.org_id, p_tipo: tipo, p_detalle: detalle || null, p_contexto: CONTEXTO })
     .then(() => {}, () => {});
 }
 async function cambiarVista(v) {
   estado.vista = v;
-  if (v === 'ayuda') { pintarAyuda(); window.scrollTo(0, 0); return; }
+  if (v === 'ayuda') { pintarAyuda(); window.scrollTo(0, 0); registrarUso('ver_ayuda', null); return; }
   if (v === 'admin') {
     try { await cargarAdmin(); registrarUso('vista_admin', null); } catch (e) { console.error(e); estado.vista = 'panel'; }
     estado.vista === 'admin' ? pintarAdmin() : pintar();
@@ -211,6 +226,7 @@ function dialogoAnadir() {
   const url = h('input', { type: 'url', required: true, placeholder: 'https://ejemplo.com' });
   const tipo = h('select', {}, h('option', { value: 'web' }, 'Web'), h('option', { value: 'bot' }, 'Bot'), h('option', { value: 'app' }, 'App'));
   const err = h('div', { class: 'msg', role: 'alert' });
+  const declaro = h('input', { type: 'checkbox', required: true });
   const dlg = h('dialog', { 'aria-labelledby': 'tit-dlg' },
     h('form', {
       method: 'dialog',
@@ -218,10 +234,10 @@ function dialogoAnadir() {
         e.preventDefault();
         err.className = 'msg'; err.textContent = '';
         const { data, error } = await sb.rpc('panel_crear_objetivo', {
-          p_org: estado.org.org_id, p_nombre: nombre.value.trim(), p_url: url.value.trim(), p_tipo: tipo.value,
+          p_org: estado.org.org_id, p_nombre: nombre.value.trim(), p_url: url.value.trim(), p_tipo: tipo.value, p_declaro: declaro.checked,
         });
         if (error) { err.className = 'msg err'; err.textContent = error.message || 'No se ha podido añadir.'; return; }
-        dlg.close(); dlg.remove(); refrescar();
+        dlg.close(); dlg.remove(); refrescar(); registrarUso('anadir_web', tipo.value);
         // Primera revisión de seguridad: queda como punto de partida. Si falla, la web se añade igual.
         lanzarRevision(data, 'alta').then(() => refrescar(), () => {});
       },
@@ -230,6 +246,9 @@ function dialogoAnadir() {
       h('label', { class: 'campo' }, 'Nombre', nombre),
       h('label', { class: 'campo' }, 'Dirección (URL)', url),
       h('label', { class: 'campo' }, 'Tipo', tipo),
+      h('label', { class: 'casilla' }, declaro,
+        h('span', {}, 'Confirmo que es mío o que tengo permiso de su titular para revisarlo. ',
+          h('a', { href: 'legal.html#condiciones', target: '_blank', rel: 'noopener' }, 'Condiciones de uso'))),
       err,
       h('div', { class: 'acciones' },
         h('button', { class: 'btn sec', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancelar'),
@@ -244,14 +263,30 @@ const fmtNota = (n) => String(n).replace('.', ',');
 function claseNota(n) { return n >= 8 ? 'ok' : n >= 5 ? 'slow' : 'down'; }
 function diagnosticoDe(o) { return estado.seguridad?.webs?.[o.id] || null; }
 
+// Revisiones nuevas: secciones con su nota y dos notas globales (Seguridad y Visibilidad).
+// Revisiones antiguas: solo los 10 puntos y una nota. Se pintan las dos formas.
+const esAmpliado = (d) => Array.isArray(d?.secciones) && d.secciones.length > 0;
+const fallosDe = (d) => esAmpliado(d)
+  ? d.secciones.reduce((n, s) => n + s.hallazgos.filter((x) => x.estado === 'fallo' && x.gravedad).length, 0)
+  : (d ? d.hallazgos.filter((x) => x.estado === 'fallo').length : 0);
+const chipNota = (n) => (n === null || n === undefined)
+  ? h('span', { class: 'chip none' }, '—')
+  : h('span', { class: 'chip ' + claseNota(n) }, fmtNota(n) + ' / 10');
+
 function lineaSeguridad(o) {
   if (!estado.seguridad) return null;
   const d = diagnosticoDe(o);
-  const fallos = d ? d.hallazgos.filter((x) => x.estado === 'fallo').length : 0;
+  const fallos = fallosDe(d);
+  const mas = h('span', { class: 'seg-mas' }, d ? (fallos ? (fallos === 1 ? '1 cosa que mejorar' : fallos + ' cosas que mejorar') : 'Todo bien') : 'Revisar');
+  if (esAmpliado(d)) {
+    return h('button', { class: 'seg-linea', type: 'button', onclick: () => dialogoSeguridad(o) },
+      h('span', {}, 'Seguridad'), chipNota(d.notas?.seguridad),
+      h('span', {}, 'Visibilidad'), chipNota(d.notas?.visibilidad), mas);
+  }
   return h('button', { class: 'seg-linea', type: 'button', onclick: () => dialogoSeguridad(o) },
     h('span', {}, 'Seguridad'),
     d ? h('span', { class: 'chip ' + claseNota(d.nota) }, fmtNota(d.nota) + ' / 10') : h('span', { class: 'chip none' }, 'Sin revisar'),
-    h('span', { class: 'seg-mas' }, d ? (fallos ? (fallos === 1 ? '1 cosa que mejorar' : fallos + ' cosas que mejorar') : 'Todo bien') : 'Revisar'));
+    mas);
 }
 
 async function lanzarRevision(objetivoId, origen) {
@@ -268,13 +303,17 @@ async function lanzarRevision(objetivoId, origen) {
 
 function hallazgo(x, veArreglos) {
   const fallo = x.estado === 'fallo';
-  const cls = x.estado === 'ok' ? 'ok' : x.estado === 'fallo' ? (x.gravedad === 'grave' ? 'down' : 'slow') : 'none';
-  const etiqueta = x.estado === 'ok' ? 'Bien' : x.estado === 'fallo' ? GRAVEDAD_TXT[x.gravedad] : 'Sin comprobar';
+  const requiere = x.estado === 'requiere';
+  const recomendado = fallo && !x.gravedad; // recomendación: se muestra pero no resta nota
+  const cls = x.estado === 'ok' ? 'ok' : fallo ? (x.gravedad === 'grave' ? 'down' : 'slow') : 'none';
+  const etiqueta = x.estado === 'ok' ? 'Bien' : recomendado ? 'Recomendado' : fallo ? GRAVEDAD_TXT[x.gravedad] : requiere ? 'Requisito' : 'Sin comprobar';
   return h('li', { class: 'hall ' + (fallo ? 'fallo' : '') },
     h('div', { class: 'row' }, h('b', {}, x.titulo), h('span', { class: 'chip ' + cls }, etiqueta)),
-    fallo && h('p', {}, x.explicacion),
+    (fallo || requiere) && h('p', {}, x.explicacion),
     fallo && x.dato && h('p', { class: 'dato' }, 'Detectado: ', x.dato),
+    requiere && x.dato && h('p', { class: 'dato' }, x.dato),
     x.estado === 'no_revisado' && x.codigo === 'SEG-09' && h('p', { class: 'dato' }, 'Se comprueba cuando demuestres que la web es tuya.'),
+    x.estado === 'no_revisado' && x.codigo !== 'SEG-09' && x.dato && h('p', { class: 'dato' }, x.dato),
     fallo && (x.arreglo
       ? h('div', { class: 'arreglo' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, x.arreglo))
       : !veArreglos && h('div', { class: 'arreglo bloq' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, 'Disponible en el plan Pro.'))));
@@ -295,7 +334,74 @@ function mejora(x, veArreglos) {
       : !veArreglos && h('div', { class: 'arreglo bloq' }, h('b', {}, 'Cómo arreglarlo'), h('span', {}, 'Disponible en el plan Pro.'))));
 }
 
-function dialogoSeguridad(o) {
+// Antes de pedir un arreglo hay que aceptar las condiciones del encargo (RGPD art. 28).
+function dialogoEncargo(o, alAceptar) {
+  const acepto = h('input', { type: 'checkbox', required: true });
+  const err = h('div', { class: 'msg', role: 'alert' });
+  const dlg = h('dialog', { 'aria-labelledby': 'tit-enc' },
+    h('form', {
+      method: 'dialog',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const { error } = await sb.rpc('panel_solicitar_arreglo', { p_org: estado.org.org_id, p_objetivo: o.id, p_nota: null, p_acepto: acepto.checked });
+        if (error) { err.className = 'msg err'; err.textContent = error.message || 'No se ha podido enviar.'; return; }
+        dlg.close(); dlg.remove(); registrarUso('solicitar_arreglo', o.nombre); alAceptar();
+      },
+    },
+      h('h2', { id: 'tit-enc' }, 'Pedir que lo arreglemos'),
+      h('p', {}, 'Te contactamos con un presupuesto. Pedirlo no te obliga a nada.'),
+      h('p', {}, 'Si lo aceptas, Zervitecnics accederá a tu web solo para hacer el arreglo, siguiendo tus instrucciones y guardando confidencialidad.'),
+      h('label', { class: 'casilla' }, acepto,
+        h('span', {}, 'Autorizo a Zervitecnics a contactarme y acepto las ',
+          h('a', { href: 'legal.html#encargo', target: '_blank', rel: 'noopener' }, 'condiciones del encargo'), '.')),
+      err,
+      h('div', { class: 'acciones' },
+        h('button', { class: 'btn sec', type: 'button', onclick: () => { dlg.close(); dlg.remove(); } }, 'Cancelar'),
+        h('button', { class: 'btn', type: 'submit' }, 'Enviar solicitud'))));
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+// Demostrar que la web es tuya: con el código, de una de tres formas. Desbloquea las comprobaciones a fondo.
+async function dialogoVerificar(o) {
+  const { data, error } = await sb.rpc('panel_verificacion', { p_org: estado.org.org_id, p_objetivo: o.id });
+  if (error) { alert(error.message || 'No se ha podido abrir.'); return; }
+  const msg = h('div', { class: 'msg', role: 'status' });
+  const cerrar = () => { dlg.close(); dlg.remove(); };
+  const hecho = Boolean(data.verificada_en);
+  const comprobar = h('button', { class: 'btn', type: 'button' }, 'Comprobar ahora');
+  comprobar.onclick = async () => {
+    comprobar.disabled = true; msg.className = 'msg'; msg.textContent = 'Comprobando…';
+    const r = await sb.functions.invoke('seguridad', { body: { org_id: estado.org.org_id, objetivo_id: o.id, accion: 'verificar' } });
+    let fallo = null;
+    if (r.error) { fallo = 'No se ha podido comprobar.'; try { const j = await r.error.context.json(); if (j?.error) fallo = j.error; } catch (_) { /* sin detalle */ } }
+    if (!fallo && r.data?.verificada) { registrarUso('verificar_web', o.nombre); cerrar(); await refrescar(); dialogoVerificar(o); return; }
+    msg.className = 'msg err'; msg.textContent = fallo || 'Todavía no encontramos el código. Si lo acabas de poner en el DNS, puede tardar unos minutos.';
+    comprobar.disabled = false;
+  };
+  const codigo = (t) => h('code', { class: 'codigo' }, t);
+  const dlg = h('dialog', { class: 'dlg-seg', 'aria-labelledby': 'tit-ver' },
+    h('div', { class: 'cuerpo' },
+      h('div', {}, h('h2', { id: 'tit-ver' }, 'Demostrar que es tuya'), h('div', { class: 'url' }, o.url)),
+      hecho
+        ? h('div', { class: 'msg okk' }, 'Verificada ' + hace(data.verificada_en).replace(/^./, (c) => c.toLowerCase()) + '. Ya se pueden hacer las comprobaciones a fondo.')
+        : [h('p', { class: 'resumen' }, 'Así sabemos que la web es tuya y podemos hacer comprobaciones más a fondo. Elige la forma que te resulte más fácil:'),
+           h('ol', { class: 'pasos' },
+             h('li', {}, h('b', {}, 'En el DNS del dominio. '), 'Añade un registro TXT con este valor:', codigo('zervitecnics-verificacion=' + data.token)),
+             h('li', {}, h('b', {}, 'Con un archivo. '), 'Sube a tu web el archivo ', codigo('/.well-known/zervitecnics-verificacion.txt'), ' con este contenido:', codigo(data.token)),
+             h('li', {}, h('b', {}, 'Con una etiqueta. '), 'Pega esto en la cabecera de la portada:', codigo('<meta name="zervitecnics-verificacion" content="' + data.token + '">')))],
+      msg,
+      h('div', { class: 'acciones' },
+        h('button', { class: 'btn sec', type: 'button', onclick: cerrar }, 'Cerrar'),
+        !hecho && comprobar)));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+  dlg.scrollTop = 0;
+}
+
+function dialogoSeguridad(o, sinContar) {
+  if (!sinContar) registrarUso('abrir_diagnostico', o.nombre);
   const g = estado.seguridad;
   const d = diagnosticoDe(o);
   const quedan = Math.max(0, (g.max_revisiones_dia ?? 0) - (g.revisiones_hoy ?? 0));
@@ -309,7 +415,8 @@ function dialogoSeguridad(o) {
     msg.className = 'msg'; msg.textContent = '';
     try {
       await lanzarRevision(o.id, d ? 'manual' : 'alta');
-      await cargarTablero(); cerrar(); pintar(); dialogoSeguridad(o);
+      registrarUso('revisar', o.nombre);
+      await cargarTablero(); cerrar(); pintar(); dialogoSeguridad(o, true);
     } catch (e) {
       msg.className = 'msg err'; msg.textContent = e.message;
       revisar.disabled = false; revisar.textContent = 'Revisar ahora';
@@ -317,26 +424,43 @@ function dialogoSeguridad(o) {
   };
 
   const pedirArreglo = h('button', { class: 'btn sec', type: 'button' }, 'Quiero que me lo arreglen');
-  pedirArreglo.onclick = async () => {
-    pedirArreglo.disabled = true;
-    const { error } = await sb.rpc('panel_solicitar_arreglo', { p_org: estado.org.org_id, p_objetivo: o.id, p_nota: null });
-    if (error) { msg.className = 'msg err'; msg.textContent = error.message || 'No se ha podido enviar.'; pedirArreglo.disabled = false; return; }
+  pedirArreglo.onclick = () => dialogoEncargo(o, () => {
     msg.className = 'msg okk'; msg.textContent = 'Recibido. Te contactamos para arreglarlo.';
-    pedirArreglo.textContent = 'Solicitud enviada';
-    registrarUso('solicitar_arreglo', o.nombre);
-  };
+    pedirArreglo.textContent = 'Solicitud enviada'; pedirArreglo.disabled = true;
+  });
+  const puedeVerificar = estado.esAdmin || ['owner', 'admin'].includes(estado.org.rol);
 
-  const fallos = d ? d.hallazgos.filter((x) => x.estado === 'fallo').length : 0;
+  const fallos = fallosDe(d);
+  const amp = esAmpliado(d);
+  const NOMBRE_SECCION = { web: 'Web y conexión', correo: 'Correo y dominio', privacidad: 'Privacidad y datos personales', cumplimiento: 'Cumplimiento legal', seo: 'SEO · buscadores', aeo: 'AEO · respuestas de las IA' };
+  const GRUPOS = [['Seguridad', ['web', 'correo', 'privacidad', 'cumplimiento'], 'seguridad'], ['Visibilidad', ['seo', 'aeo'], 'visibilidad']];
+  const seccion = (s) => {
+    const f = s.hallazgos.filter((x) => x.estado === 'fallo').length;
+    return h('details', { class: 'seccion', ontoggle: (e) => { if (e.target.open) registrarUso('abrir_seccion', s.seccion); } },
+      h('summary', {}, h('span', { class: 'sec-nom' }, NOMBRE_SECCION[s.seccion] || s.seccion), chipNota(s.nota),
+        h('span', { class: 'seg-mas' }, f ? (f === 1 ? '1 punto' : f + ' puntos') : 'Todo bien')),
+      h('ul', { class: 'halls' }, s.hallazgos.map((x) => hallazgo(x, g.ve_arreglos))));
+  };
+  const cuerpoAmpliado = () => GRUPOS.map(([titulo, claves, nota]) => {
+    const secs = d.secciones.filter((s) => claves.includes(s.seccion));
+    return secs.length > 0 && h('section', { class: 'grupo' },
+      h('div', { class: 'grupo-cab' }, h('h3', {}, titulo), chipNota(d.notas?.[nota])),
+      ...secs.map(seccion));
+  });
   const dlg = h('dialog', { class: 'dlg-seg', 'aria-labelledby': 'tit-seg' },
     h('div', { class: 'cuerpo' },
       h('div', { class: 'seg-cab' },
-        h('div', {}, h('h2', { id: 'tit-seg', tabindex: '-1', autofocus: true }, 'Seguridad de ', o.nombre), h('div', { class: 'url' }, o.url)),
-        d && h('div', { class: 'nota ' + claseNota(d.nota) }, h('b', {}, fmtNota(d.nota)), h('span', {}, 'de 10'))),
+        h('div', {}, h('h2', { id: 'tit-seg', tabindex: '-1', autofocus: true }, amp ? 'Diagnóstico de ' : 'Seguridad de ', o.nombre), h('div', { class: 'url' }, o.url)),
+        d && !amp && h('div', { class: 'nota ' + claseNota(d.nota) }, h('b', {}, fmtNota(d.nota)), h('span', {}, 'de 10')),
+        amp && h('div', { class: 'notas' },
+          ...GRUPOS.map(([titulo, , nota]) => d.notas?.[nota] != null && h('div', { class: 'nota ' + claseNota(d.notas[nota]) },
+            h('b', {}, fmtNota(d.notas[nota])), h('span', {}, titulo))))),
       d
         ? h('p', { class: 'resumen' }, fallos ? `Hemos encontrado ${fallos === 1 ? 'una cosa' : fallos + ' cosas'} que mejorar. ` : 'No hemos encontrado nada que mejorar. ',
             h('span', { class: 't' }, 'Revisado ' + hace(d.ts).replace(/^./, (c) => c.toLowerCase()) + '.'))
         : h('p', { class: 'resumen' }, 'Esta web todavía no tiene ninguna revisión de seguridad.'),
-      d && h('ul', { class: 'halls' }, d.hallazgos.map((x) => hallazgo(x, g.ve_arreglos))),
+      d && !amp && h('ul', { class: 'halls' }, d.hallazgos.map((x) => hallazgo(x, g.ve_arreglos))),
+      amp && cuerpoAmpliado(),
       d && d.mejoras?.length > 0 && h('section', { class: 'mejoras' },
         h('h3', {}, 'Mejoras recomendadas'),
         h('p', { class: 'sub' }, 'No restan nota.'),
@@ -347,6 +471,7 @@ function dialogoSeguridad(o) {
       msg,
       h('div', { class: 'acciones' },
         h('button', { class: 'btn sec', type: 'button', onclick: cerrar }, 'Cerrar'),
+        puedeVerificar && h('button', { class: 'btn sec', type: 'button', onclick: () => { cerrar(); dialogoVerificar(o); } }, 'Demostrar que es tuya'),
         d && fallos > 0 && pedirArreglo,
         revisar)));
   dlg.addEventListener('close', () => dlg.remove());
@@ -501,7 +626,84 @@ function pintar() {
 const TIPO_USO = {
   entrada: 'Entró al panel', objetivo_anadido: 'Añadió', objetivo_quitado: 'Quitó',
   error_carga: 'Error al cargar', vista_admin: 'Abrió Administración',
+  abrir_diagnostico: 'Abrió un diagnóstico', abrir_seccion: 'Abrió una sección', revisar: 'Lanzó una revisión',
+  anadir_web: 'Añadió', solicitar_arreglo: 'Pidió un arreglo', ver_ayuda: 'Abrió la ayuda', verificar_web: 'Verificó una web',
+  aceptar_legal: 'Aceptó las condiciones', verificar: 'Comprobó la verificación',
 };
+const NOMBRE_SEC_CORTO = { web: 'Web y conexión', correo: 'Correo y dominio', privacidad: 'Privacidad', cumplimiento: 'Cumplimiento legal', seo: 'SEO', aeo: 'AEO' };
+const NOMBRE_DISP = { movil: 'Móvil', tableta: 'Tableta', ordenador: 'Ordenador' };
+function nombrePais(c) {
+  if (!/^[A-Z]{2}$/.test(c)) return c;
+  try { return new Intl.DisplayNames(['es'], { type: 'region' }).of(c) || c; } catch (_) { return c; }
+}
+// Lista con barras: [{ v, n }] ya ordenada de más a menos.
+function barras(titulo, lista, nombre) {
+  const max = Math.max(1, ...lista.map((x) => x.n));
+  return h('article', { class: 'card barras' }, h('h3', {}, titulo),
+    lista.length
+      ? lista.slice(0, 8).map((x) => h('div', { class: 'barra' },
+          h('span', { class: 'bn' }, nombre ? nombre(x.v) : x.v), h('span', { class: 'bt', 'aria-hidden': 'true' }, h('i', { style: `width:${Math.round((x.n / max) * 100)}%` })), h('b', {}, String(x.n))))
+      : h('p', { class: 'vacio' }, 'Sin datos todavía.'));
+}
+function seccionEstadisticas() {
+  const e = estado.estadisticas;
+  if (!e) return null;
+  const g = e.grupos || {};
+  const dias = e.por_dia || [];
+  const maxDia = Math.max(1, ...dias.map((d) => d.n));
+  return h('section', { class: 'main' }, h('h2', {}, `Estadísticas de uso, ${e.dias} días`),
+    h('div', { class: 'stats adm-stats' },
+      mosaico(String(e.entradas ?? 0), 'entradas al panel'), mosaico(String(e.usuarios ?? 0), 'personas distintas'),
+      mosaico(String(e.clientes_activos ?? 0), 'clientes activos'), mosaico(String(e.webs_revisadas ?? 0), 'webs revisadas')),
+    h('article', { class: 'card barras' }, h('h3', {}, 'Entradas por día'),
+      h('div', { class: 'dias', role: 'img', 'aria-label': `Entradas por día: ${dias.map((d) => d.n).join(', ')}` },
+        dias.map((d) => h('i', { style: `height:${Math.max(4, Math.round((d.n / maxDia) * 100))}%`, title: `${d.dia}: ${d.n}` })))),
+    h('div', { class: 'grid cli' },
+      barras('De qué país entran', g.pais || [], nombrePais),
+      barras('Con qué dispositivo', g.dispositivo || [], (v) => NOMBRE_DISP[v] || v),
+      barras('Zona horaria', g.zona || []),
+      barras('Idioma del navegador', g.idioma || []),
+      barras('Secciones más abiertas', g.seccion || [], (v) => NOMBRE_SEC_CORTO[v] || v),
+      barras('Fallos más comunes (webs)', (e.fallos_comunes || []).map((x) => ({ v: x.titulo, n: x.n })))),
+    h('article', { class: 'card' }, h('h3', { class: 'h3' }, 'Vieron fallos y no han pedido arreglo'),
+      (e.sin_pedir_arreglo || []).length
+        ? (e.sin_pedir_arreglo || []).map((x) => h('div', { class: 'meta' }, h('span', {}, h('b', {}, x.cliente)), h('span', {}, `${x.fallos} ${x.fallos === 1 ? 'fallo' : 'fallos'} · lo miró ${hace(x.visto).toLowerCase()}`)))
+        : h('p', { class: 'vacio' }, 'Nadie por ahora.')),
+    h('p', { class: 'letra-chica' }, 'Estadísticas propias: sin cookies ni empresas externas, y sin guardar la IP. Se borran a los 12 meses.'));
+}
+function seccionSeguridadPanel() {
+  const s = estado.adminSeg;
+  if (!s) return null;
+  const recargar = async () => { await cargarAdmin(); pintarAdmin(); };
+  const bloquear = async (ip) => {
+    if (!confirm(`¿Bloquear ${ip} durante 30 días? No podrá lanzar revisiones ni añadir webs.`)) return;
+    const { error } = await sb.rpc('panel_bloquear_ip', { p_ip: ip, p_motivo: null, p_dias: 30 });
+    if (error) alert(error.message || 'No se ha podido bloquear.'); else recargar();
+  };
+  const desbloquear = async (ip) => {
+    const { error } = await sb.rpc('panel_desbloquear_ip', { p_ip: ip });
+    if (error) alert(error.message || 'No se ha podido desbloquear.'); else recargar();
+  };
+  return h('section', { class: 'main' }, h('h2', {}, 'Seguridad del panel'),
+    h('div', { class: 'grid cli' },
+      h('article', { class: 'card' }, h('h3', { class: 'h3' }, 'IP bloqueadas'),
+        s.bloqueadas.length
+          ? s.bloqueadas.map((b) => h('div', { class: 'meta' },
+              h('span', {}, h('b', {}, b.ip), ' · ', b.motivo, b.automatica ? ' (automático)' : ''),
+              h('button', { class: 'link', type: 'button', onclick: () => desbloquear(b.ip) }, 'Desbloquear')))
+          : h('p', { class: 'vacio' }, 'Ninguna.')),
+      h('article', { class: 'card' }, h('h3', { class: 'h3' }, 'IP con más actividad, 24 h'),
+        s.activas.length
+          ? s.activas.map((a) => h('div', { class: 'meta' },
+              h('span', {}, h('b', {}, a.ip), a.pais ? ` · ${nombrePais(a.pais)}` : '', ` · ${a.n} ${a.n === 1 ? 'petición' : 'peticiones'}`),
+              h('button', { class: 'link', type: 'button', onclick: () => bloquear(a.ip) }, 'Bloquear')))
+          : h('p', { class: 'vacio' }, 'Sin actividad.'))),
+    h('div', { class: 'ev' }, s.recientes.slice(0, 15).map((r) => h('div', { class: 'it' },
+      h('div', { class: 'dot ' + (r.permitido ? 'informativo' : 'urgente'), 'aria-hidden': 'true' }),
+      h('div', {}, h('b', {}, `${TIPO_USO[r.accion] || r.accion}${r.permitido ? '' : ' (rechazado)'}`),
+        h('div', { class: 'd' }, `${r.email || 'Sin usuario'} · ${r.ip || 'sin IP'}${r.pais ? ' · ' + nombrePais(r.pais) : ''}`), h('div', { class: 't' }, hace(r.ts)))))),
+    h('p', { class: 'letra-chica' }, 'La IP se guarda 12 meses solo para frenar abusos (RGPD art. 6.1.f). Tope por IP y hora: 30 revisiones; al superarlo se bloquea 24 horas.'));
+}
 function mosaico(valor, etiqueta, nivel) {
   return h('div', { class: 'stat adm ' + (nivel || '') }, h('b', {}, valor), h('span', {}, etiqueta));
 }
@@ -603,6 +805,8 @@ function pintarAdmin() {
         h('div', { class: 'acciones' },
           h('button', { class: 'btn sec', type: 'button', onclick: () => dialogoFuente(c) }, 'Conectar datos')))))
         : h('p', { class: 'vacio' }, 'Todavía no hay clientes.')),
+    seccionEstadisticas(),
+    seccionSeguridadPanel(),
     h('section', { class: 'main' }, h('h2', {}, 'Uso del panel'),
       porTipo.length ? h('div', { class: 'stats adm-stats' }, porTipo.map(([t, n]) => mosaico(String(n), (TIPO_USO[t] || t) + ', 7 días'))) : null,
       recientes.length
@@ -651,6 +855,11 @@ function pintarAyuda() {
         h('p', {}, 'Si tu plan lo incluye, verás cuántas veces apareces en Google y Bing, cuántas personas hacen clic y las visitas a tu web, comparado con los 28 días anteriores. Se actualiza una vez al día.')),
       bloque('Claro u oscuro',
         h('p', {}, 'Con los botones «Claro» y «Oscuro» eliges cómo ver el panel. Se recuerda en este navegador.')),
+      bloque('Tus datos',
+        h('p', {}, 'El panel no usa cookies de seguimiento ni comparte tus datos para publicidad. Guardamos tu dirección IP 12 meses solo para evitar abusos.'),
+        h('p', {}, h('a', { href: 'legal.html#privacidad', target: '_blank', rel: 'noopener' }, 'Política de privacidad'), ' · ',
+          h('a', { href: 'legal.html#condiciones', target: '_blank', rel: 'noopener' }, 'Condiciones de uso'), ' · ',
+          h('a', { href: 'legal.html#aviso', target: '_blank', rel: 'noopener' }, 'Aviso legal'))),
       bloque('¿Necesitas ayuda?',
         h('p', {}, 'Escribe a Zervitecnics: ', h('b', {}, 'info@zervitecnics.es')))));
 }
@@ -684,11 +893,46 @@ function cabecera(conTabs, tabs) {
       h('button', { class: 'link', type: 'button', onclick: async () => { await sb.auth.signOut(); estado.datos = null; estado.vista = 'panel'; estado.esAdmin = false; try { sessionStorage.removeItem('entrada'); } catch (_) { /* nada */ } pantallaLogin(); } }, 'Salir')));
 }
 
+/* ---------- aceptación de condiciones y privacidad (antes de usar el panel) ---------- */
+function pantallaAceptar(version) {
+  clearInterval(estado.timer);
+  const casilla = h('input', { type: 'checkbox', required: true });
+  const aviso = h('div', { class: 'msg', role: 'status' });
+  const enlace = (ancla, texto) => h('a', { href: 'legal.html#' + ancla, target: '_blank', rel: 'noopener' }, texto);
+  pintarEn(app, h('form', {
+    class: 'login',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const { error } = await sb.rpc('panel_aceptar_legal', { p_version: version });
+      if (error) { aviso.className = 'msg err'; aviso.textContent = error.message || 'No se ha podido guardar. Inténtalo de nuevo.'; return; }
+      iniciar();
+    },
+  },
+    h('div', { class: 'brand' }, h('div', { class: 'logo', 'aria-hidden': 'true' }, 'Z'),
+      h('div', {}, h('b', {}, 'Zervitecnics'), h('span', {}, 'Panel de monitoreo'))),
+    h('h1', {}, 'Antes de empezar'),
+    h('p', {}, 'Para usar el panel necesitamos que aceptes cómo funciona y cómo tratamos tus datos. En corto:'),
+    h('ul', { class: 'puntos' },
+      h('li', {}, 'Revisamos solo las webs, apps y bots que tú añadas, y deben ser tuyos o tener permiso de su titular.'),
+      h('li', {}, 'Guardamos tu correo, tus webs y los resultados de las revisiones para darte el servicio.'),
+      h('li', {}, 'Guardamos tu dirección IP 12 meses, solo para evitar abusos.'),
+      h('li', {}, 'No usamos cookies de seguimiento ni compartimos tus datos para publicidad.')),
+    h('label', { class: 'casilla' }, casilla,
+      h('span', {}, 'He leído y acepto las ', enlace('condiciones', 'condiciones de uso'), ' y la ', enlace('privacidad', 'política de privacidad'), '.')),
+    h('button', { class: 'btn', type: 'submit' }, 'Aceptar y entrar'),
+    h('button', { class: 'link', type: 'button', onclick: async () => { await sb.auth.signOut(); pantallaLogin(); } }, 'No acepto: salir'),
+    aviso));
+}
+
 /* ---------- arranque ---------- */
 async function iniciar() {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) { pantallaLogin(); return; }
   try {
+    // Sin aceptar la versión vigente de las condiciones y la privacidad no se carga ningún dato.
+    const legal = await sb.rpc('panel_estado_legal');
+    if (legal.error) throw legal.error;
+    if (!legal.data?.aceptada) { pantallaAceptar(legal.data?.version); return; }
     await cargarOrgs();
     try { const r = await sb.rpc('panel_es_admin'); estado.esAdmin = r.data === true; } catch (_) { estado.esAdmin = false; }
     await cargarTablero();
